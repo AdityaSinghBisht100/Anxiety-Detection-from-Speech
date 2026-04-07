@@ -125,9 +125,21 @@ python PHQ8/predict.py audio_files/inference1.wav
 
 # Use XGBoost instead
 python PHQ8/predict.py audio_files/inference1.wav --classifier xgb
+
+# View step-by-step extraction details
+python PHQ8/predict.py audio_files/inference1.wav --verbose
+
+# Output pure JSON for programmatic integration
+python PHQ8/predict.py audio_files/inference1.wav --json
 ```
 
-**Output format:**
+**Full CLI Arguments:**
+*   `audio` (positional): Path to the input `.wav` file
+*   `--classifier`: Which trained model to use (`svm` or `xgb`), default: `svm`
+*   `--verbose`, `-v`: Prints step-by-step timings and feature shapes
+*   `--json`: Outputs only a JSON format without ASCII formatting
+
+**Visual Output Format:**
 ```text
 PHQ-8 Score Prediction Result Format        
 File       :                   
@@ -144,6 +156,19 @@ PHQ-8 Clinical Scale Reference:
  10–14  Moderate
  15–19  Moderately Severe
  20–24  Severe
+```
+
+**JSON Output Format (`--json`):**
+```json
+{
+  "phq_score": 7,
+  "severity": "Mild",
+  "confidence": 0.127,
+  "duration_s": 16.7,
+  "n_segments": 2,
+  "classifier": "svm",
+  "elapsed_s": 8.5
+}
 ```
 
 ---
