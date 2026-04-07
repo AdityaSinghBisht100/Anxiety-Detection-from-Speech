@@ -18,7 +18,6 @@ checkpoints/
 #scalers/
 *.pt
 *.pth
-*.joblib
 *.pkl
 
 # Environmental and configuration
