@@ -39,14 +39,15 @@ import gc
 import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
+import xgboost as xgb
 import numpy as np
 import pandas as pd
 import librosa
 import torch
 import torch.nn as nn
 import joblib
-
+from transformers import Wav2Vec2Model
+import opensmile
 from sklearn.decomposition import PCA
 from sklearn.metrics import (
     classification_report,
@@ -242,7 +243,6 @@ class FrozenWav2VecExtractor(nn.Module):
     """
     def __init__(self):
         super().__init__()
-        from transformers import Wav2Vec2Model
         print(f"  Loading {WAV2VEC_MODEL} … (first run downloads ~360 MB)")
         self.backbone = Wav2Vec2Model.from_pretrained(WAV2VEC_MODEL)
         for param in self.backbone.parameters():
@@ -319,11 +319,6 @@ def extract_egemaps_per_segments(
     Per-segment eGeMAPSv02 extraction → element-wise mean → (88,)
     Returns zeros if opensmile is not installed.
     """
-    try:
-        import opensmile
-    except ImportError:
-        print("  [WARN] opensmile not installed — eGeMAPS zeros (pip install opensmile)")
-        return np.zeros(EGEMAPS_DIM, dtype=np.float32)
 
     smile = opensmile.Smile(
         feature_set=opensmile.FeatureSet.eGeMAPSv02,
@@ -458,9 +453,7 @@ def load_or_extract_split(
     return X, y
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # STAGE 6 — Evaluation
-# ─────────────────────────────────────────────────────────────────────────────
 def evaluate_split(
     clf,
     X: np.ndarray,
@@ -497,9 +490,7 @@ def evaluate_split(
         print(cm)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # STAGE 4-5-6 — Preprocess + train classifiers + evaluate
-# ─────────────────────────────────────────────────────────────────────────────
 def train_and_evaluate(
     X_train: np.ndarray, y_train: np.ndarray,
     X_dev:   np.ndarray, y_dev:   np.ndarray,
@@ -567,8 +558,7 @@ def train_and_evaluate(
     print(f"  STAGE 5 (Secondary) — XGBoost")
     print(f"{'='*60}")
     try:
-        import xgboost as xgb
-        print(f"  XGBoost {xgb.__version__} | objective=multi:softmax | num_class={NUM_CLASSES}")
+        print(f"XGBoost {xgb.__version__} | objective=multi:softmax | num_class={NUM_CLASSES}")
 
         xgb_clf = xgb.XGBClassifier(
             objective="multi:softmax",
@@ -603,9 +593,7 @@ def train_and_evaluate(
         print(f"  [ERROR] XGBoost failed: {e}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # INFERENCE — predict PHQ-8 integer score from a wav file
-# ─────────────────────────────────────────────────────────────────────────────
 def predict_phq_score(wav_path: str, classifier: str = "svm") -> int:
     """
     Predict PHQ-8 integer score (0-24) for a new audio file.
@@ -648,22 +636,18 @@ def predict_phq_score(wav_path: str, classifier: str = "svm") -> int:
     return phq_pred
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # MAIN
-# ─────────────────────────────────────────────────────────────────────────────
 def main():
-    print("=" * 60)
-    print("  Anxiety Detection — 25-Class PHQ-8 (Local DAIC-WOZ)")
-    print("  Architecture: Frozen wav2vec2-base + eGeMAPSv02 → SVM")
-    print("=" * 60)
-    print(f"  Device     : {DEVICE}")
-    print(f"  Dataset    : {DATASET_DIR.resolve()}")
-    print(f"  Cache dir  : {CACHE_DIR.resolve()}")
-    print(f"  Models dir : {SCALERS_DIR.resolve()}")
+    print("Anxiety Detection — 25-Class PHQ-8 (Local DAIC-WOZ)")
+    print("Architecture: Frozen wav2vec2-base + eGeMAPSv02 → SVM")
+    print(f"Device     : {DEVICE}")
+    print(f"Dataset    : {DATASET_DIR.resolve()}")
+    print(f"Cache dir  : {CACHE_DIR.resolve()}")
+    print(f"Models dir : {SCALERS_DIR.resolve()}")
     print()
 
-    # ── Stage 1: Load labels from AVEC2017 CSVs ───────────────────────────
-    print("--- Stage 1: Loading AVEC2017 labels ---")
+    #Stage 1: Load labels from AVEC2017 CSVs
+    print("Stage 1: Loading AVEC2017 labels")
     train_labels = load_labels(DATASET_DIR / TRAIN_CSV)
     dev_labels   = load_labels(DATASET_DIR / DEV_CSV)
 
@@ -672,10 +656,10 @@ def main():
               f"Expected: {DATASET_DIR / TRAIN_CSV}")
         return
 
-    print(f"\n  Train participants with labels : {len(train_labels)}")
-    print(f"  Dev   participants with labels : {len(dev_labels)}")
+    print(f"\n Train participants with labels : {len(train_labels)}")
+    print(f"Dev participants with labels : {len(dev_labels)}")
 
-    # ── Stage 2-3: Feature extraction ─────────────────────────────────────
+    #Stage 2-3: Feature extraction
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     # Check if all caches exist before loading the heavy model
@@ -687,15 +671,15 @@ def main():
     )
 
     if all_cached:
-        print("\n--- Stage 2-3: Loading cached features (skipping extraction) ---")
+        print("\nStage 2-3: Loading cached features (skipping extraction)")
         X_train = np.load(str(CACHE_DIR / "train_X.npy"))
         y_train = np.load(str(CACHE_DIR / "train_y.npy"))
         X_dev   = np.load(str(CACHE_DIR / "dev_X.npy"))
         y_dev   = np.load(str(CACHE_DIR / "dev_y.npy"))
-        print(f"  Train: X={X_train.shape}, y={y_train.shape}")
-        print(f"  Dev  : X={X_dev.shape}, y={y_dev.shape}")
+        print(f"Train: X={X_train.shape}, y={y_train.shape}")
+        print(f"Dev  : X={X_dev.shape}, y={y_dev.shape}")
     else:
-        print("\n--- Stage 2-3: Extracting features (Frozen wav2vec2-base + eGeMAPS) ---")
+        print("\nStage 2-3: Extracting features (Frozen wav2vec2-base + eGeMAPS)")
         model = FrozenWav2VecExtractor().to(DEVICE).eval()
 
         X_train, y_train = load_or_extract_split("train", train_labels, model)
@@ -707,42 +691,31 @@ def main():
             torch.cuda.empty_cache()
 
     # Summary
-    print(f"\n{'='*60}")
-    print("  Extraction Summary")
-    print(f"{'='*60}")
+    print("Extraction Summary")
     for name, X, y in [("train", X_train, y_train), ("dev", X_dev, y_dev)]:
         if len(X) > 0:
             unique, counts = np.unique(y, return_counts=True)
-            print(f"  {name:6s}: {len(X)} participants | "
-                  f"PHQ [{int(y.min())}–{int(y.max())}] | "
+            print(f"{name:6s}: {len(X)} participants | "
+                  f"PHQ [{int(y.min())}-{int(y.max())}] | "
                   f"{len(unique)} distinct classes")
         else:
-            print(f"  {name:6s}: 0 participants (no audio found)")
+            print(f"{name:6s}: 0 participants (no audio found)")
 
     if len(X_train) == 0:
         print("\n[FATAL] No training features. Check that audio files exist under "
               f"{DATASET_DIR.resolve()}")
         return
 
-    # ── Stage 4-5-6: Scale → PCA → Train classifiers → Evaluate ──────────
+    # Stage 4-5-6: Scale → PCA → Train classifiers → Evaluate ──────────
     train_and_evaluate(X_train, y_train, X_dev, y_dev)
 
-    print(f"\n{'='*60}")
-    print("  PIPELINE COMPLETE")
-    print(f"{'='*60}")
-    print("  Saved artefacts:")
+    print("PIPELINE COMPLETE")
+    print("Saved artefacts:")
     for f in ["scaler_hf.joblib", "pca_hf.joblib",
               "svm_phq_classifier.joblib", "xgb_phq_classifier.joblib"]:
         p = SCALERS_DIR / f
         if p.exists():
-            print(f"    {p}")
-    print()
-    print("  Predict on a new file:")
-    print("    from train_hf_classifier import predict_phq_score")
-    print("    score = predict_phq_score('audio_files/inference1.wav')")
-    print("    print(f'PHQ-8 score: {score}')   # integer 0-24")
-    print()
-
+            print(f"{p}")
 
 if __name__ == "__main__":
     main()

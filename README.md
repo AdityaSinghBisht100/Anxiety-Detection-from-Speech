@@ -1,4 +1,4 @@
-# Speech Anxiety Detection
+# Speech Anxiety & Depression Detection
 
 ![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C.svg)
@@ -6,13 +6,41 @@
 
 A production-ready pipeline for detecting clinical anxiety and depression from raw speech using a **Dual-Branch Fusion Architecture**. 
 
-This system leverages deep contextual embeddings from **Wav2Vec 2.0 (with LoRA)** alongside clinically validated acoustic markers from **eGeMAPS (openSMILE)**, optimized specifically for small clinical datasets like DAIC-WOZ and DEPAC.
+This repository contains two parallel approaches to predicting anxiety/depression from speech, utilizing deep contextual embeddings from **Wav2Vec 2.0** alongside clinically validated acoustic markers from **eGeMAPS (openSMILE)**:
+
+1.  **`PHQ8/`**: Predicts the exact integer **PHQ-8 Score (0-24)** utilizing classical ML (SVM/XGBoost) after feature extraction and PCA.
+2.  **`wave2vecprob/`**: Predicts a **Binary Probability (0-1)** utilizing a PyTorch classification head and LoRA fine-tuning.
 
 ---
 
-##  Architecture Overview
+## Architecture 1: PHQ-8 Score Classifier (`PHQ8/`)
 
-The system uses a late-fusion approach to combine the representational power of large self-supervised models with the explainability of traditional speech features.
+The primary pipeline leverages fully-frozen Wav2Vec 2.0 for robust representations without overfitting on small datasets like DAIC-WOZ.
+
+```text
+Raw Audio (16kHz) ──┬──→ [Frozen Wav2Vec 2.0 Base] → [Mean + Max Pooling] ──────────────────────────→ [1536-d]
+                    │                                                                                    ↓
+                    └──→ [eGeMAPS 88 features] → [Per-Segment Aggregation] ─────────────────────────→ [88-d]
+                                                                                                         ↓
+                                                                                               [Concatenation]  → (1624-d)
+                                                                                                         ↓
+                                                                                               [Standard Scaler + PCA] → (~110-d)
+                                                                                                         ↓
+                                                                                               [SVM / XGBoost]
+                                                                                                         ↓
+                                                                                               PHQ-8 Score (0-24)
+```
+
+### Key Decisions
+1. **Frozen 95M Parameters**: Prevents catastrophic overfitting on tiny DAIC-WOZ datasets.
+2. **Mean + Max Pooling**: Captures both sustained emotion/prosody (mean) and peak burst characteristics (max).
+3. **PCA + SVM**: Reduces dimensions using PCA to 95% variance and balances 25 classes with strict SVM RBF weights (`class_weight='balanced'`).
+
+---
+
+## Architecture 2: Probability Score (`wave2vecprob/`)
+
+This approach uses a late-fusion approach to combine the representational power of large self-supervised models with the explainability of traditional speech features.
 
 ```text
 Raw Audio (16kHz) ──┬──→ [Wav2Vec 2.0 + LoRA] → [Weighted Layer Aggregation] → [Attention Pooling] → [768-d]
@@ -26,11 +54,12 @@ Raw Audio (16kHz) ──┬──→ [Wav2Vec 2.0 + LoRA] → [Weighted Layer Ag
                                                                                                 Anxiety Score (0-1)
 ```
 
-### Key Innovations (v2 Architecture)
-1. **LoRA Fine-Huning**: Wav2Vec 2.0 is trained using Low-Rank Adaptation (r=8), injecting only ~150K trainable parameters to prevent catastrophic forgetting on tiny datasets.
-2. **Weighted Layer Aggregation**: Instead of just using the final transformer layer, the model learns a 12-parameter scalar distribution to focus on middle layers (often richer in prosody/emotion signals).
-3. **Attention Pooling**: Replaces simple mean pooling. A learned attention mechanism focuses on anxiety-salient sparse frames (e.g., specific pitch spikes or disfluencies).
-4. **eGeMAPS Complement**: A lightweight 88-dimensional feature set (jitter, shimmer, formants, HNR) injected during late fusion to ground the deep representations with concrete physiological markers.
+### Key Innovations 
+1. **LoRA Fine-Huning**: Wav2Vec 2.0 is trained using Low-Rank Adaptation (r=8), injecting only ~150K trainable parameters to prevent catastrophic forgetting.
+2. **Weighted Layer Aggregation**: Instead of just using the final transformer layer, the model learns a 12-parameter scalar distribution to focus on middle layers.
+3. **Attention Pooling**: Replaces simple mean pooling. A learned attention mechanism focuses on anxiety-salient sparse frames (e.g., specific pitch spikes).
+4. **eGeMAPS Complement**: A lightweight 88-dimensional feature set injected during late fusion to ground deep representations with physiological markers.
+
 
 ---
 
@@ -38,139 +67,120 @@ Raw Audio (16kHz) ──┬──→ [Wav2Vec 2.0 + LoRA] → [Weighted Layer Ag
 
 ```text
 speech_anxiety_detection/
+├── PHQ8/
+│   ├── train.py                   # Local feature extraction & SVM/XGBoost training (PHQ-8 0-24)
+│   └── predict.py                 # Predict integer PHQ-8 score from new audios
+├── wave2vecprob/
+│   ├── train.py                   # PyTorch LoRA fine-tuning script (Anxiety 0-1 prob)
+│   ├── predict.py                 # Predict binary probability score
+│   ├── verify.py                  # Automated test script for tensor shapes
+│   └── requirements.txt           # Pinned dependencies
 ├── configs/
-│   ├── model_config.yaml          # Architecture hyperparameters
-│   └── training_config.yaml       # Phase 1 & 2 training schedules
-├── src/
-│   ├── preprocessing/             # audio_utils, VAD, segmentation, eGeMAPS
-│   ├── data/                      # PyTorch Datasets (DAIC-WOZ loader), augmentation
-│   ├── models/                    # Network definitions (LoRA backbone, pooling, fusion)
-│   ├── training/                  # Custom loss (Focal/WeightedBCE), metrics, trainer
-│   └── inference/                 # End-to-end predictor, FastAPI server
-├── train.py                       # CLI entry point for training
-├── predict.py                     # CLI entry point for local inference
-├── verify.py                      # Automated test script for CI/CD
-└── requirements.txt               # Pinned dependencies
+│   └── dataset/                   # Local dataset placement (DAIC-WOZ)
+├── kaggle/
+│   ├── kaggle_dataprep.py         # Notebook for prep on Kaggle
+│   └── kaggle_gpu_train.py        # Standalone Kaggle GPU training script
+└── README.md
 ```
 
 ---
 
 ## Setup & Installation
 
-### Local Setup (Inference & Prototyping)
-
 ```bash
 git clone <repo-url>
-cd speech_anxiety_detection
+cd Anxiety-Detection-from-Speech
 
 # Create a virtual environment
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies (utilize the ones provided in wave2vecprob)
+pip install -r wave2vecprob/requirements.txt
 ```
 
 ---
 
-## Training Workflow (Kaggle / Cloud GPU)
-
-Since clinical datasets are small, full end-to-end training runs smoothly on a single T4 or P100 GPU on platforms like Kaggle.
+# Usage: PHQ-8 Prediction Pipeline (`PHQ8/`)
 
 ### 1. Data Preparation
-Our dataloader natively supports the **DAIC-WOZ** format. It automatically parses `*_TRANSCRIPT.csv` to strip out the virtual interviewer (Ellie) and only runs inference on participant speech. 
+Our dataloader supports the **local DAIC-WOZ** format directly inside `configs/dataset/`.
+Place the `train_split_Depression_AVEC2017.csv` and `dev_split_Depression_AVEC2017.csv` along with `<PID>_P` audio folders here. The dataloader automatically parses `*_TRANSCRIPT.csv` to strip out the virtual interviewer (Ellie) and only runs inference on participant speech.
 
-### 2. Multi-Phase Training Strategy
-To maximize performance, training is broken into two phases:
-*   **Phase 1 (WarmUp):** Train the LoRA adapters on standard Speech Emotion Recognition (SER) datasets (e.g., IEMOCAP) to teach the model to extract paralinguistic features.
-*   **Phase 2 (Fine-Tuning):** Transfer the weights and train on the target anxiety dataset (DAIC-WOZ).
+### 2. Training
+Run training to extract features, apply PCA, and train the SVM and XGBoost classifiers.
 
-Upload the `speech_anxiety_detection/` repository to Kaggle, mount your datasets, and execute:
+```bash
+# Processes audio, caches hf_embeddings/, trains & saves PCA/SVM in scalers/
+python PHQ8/train.py
+```
+
+### 3. Local Inference
+
+Given a new audio interview, predict the precise PHQ-8 severity:
+
+```bash
+# Basic prediction (uses SVM by default)
+python PHQ8/predict.py audio_files/inference1.wav
+
+# Use XGBoost instead
+python PHQ8/predict.py audio_files/inference1.wav --classifier xgb
+```
+
+**Output format:**
+```text
+PHQ-8 Score Prediction Result Format        
+File       :                   
+PHQ-8 Score:                                   
+Severity   :                                
+Classifier :                                 
+Duration   :           
+Elapsed    :                              
+Confidence :                            
+
+PHQ-8 Clinical Scale Reference:
+  0– 4  Minimal / None
+  5– 9  Mild
+ 10–14  Moderate
+ 15–19  Moderately Severe
+ 20–24  Severe
+```
+
+---
+
+## Usage: Probability Score Pipeline (`wave2vecprob/`)
+
+### 1. Training
 
 ```bash
 # Phase 1: SER warm-up (Optional but recommended)
-python train.py --phase phase1 --train_csv /kaggle/input/ser_labels.csv --epochs 15 --device cuda
+python wave2vecprob/train.py --phase phase1 --train_csv data/ser_labels.csv --epochs 15 --device cuda
 
-# Phase 2: Anxiety fine-tuning
-python train.py --phase phase2 --data_dir /kaggle/input/daic-woz-dataset --epochs 35 --device cuda
+# Phase 2: Anxiety probability fine-tuning
+python wave2vecprob/train.py --phase phase2 --data_dir configs/dataset --epochs 35 --device cuda
 ```
 
-### 3. Downloading Checkpoints
-The trainer intentionally saves **only** the LoRA weights and the custom classification heads (1–3 MB). You do not need to download the 360MB Wav2Vec 2.0 backbone. 
-
-Download `checkpoints/best_phase2.pt` to your local machine for inference.
-
----
-
-## Local Inference & API
-
-Once you have a downloaded Kaggle checkpoint, you can run rapid inference locally on a CPU. The model handles all internal slicing for long audio (>10s) and aggregates predictions automatically.
-
-### CLI Usage
+### 2. Local Inference / API
 
 ```bash
 # Predict a single file
-python predict.py --audio test_recording.wav --checkpoint checkpoints/best_phase2.pt
+python wave2vecprob/predict.py --audio test_recording.wav --checkpoint checkpoints/best_phase2.pt
 
-# Predict a batch of files in a directory
-python predict.py --audio_dir path/to/audios/ --checkpoint checkpoints/best_phase2.pt --output results.json
+# Start the FastAPI REST server on port 8000
+python wave2vecprob/predict.py --serve --checkpoint checkpoints/best_phase2.pt
 ```
-
-### FastAPI REST Server
-
-The repository comes with a production-ready FastAPI endpoint that exposes the model.
-
-```bash
-# Start the server on port 8000
-python predict.py --serve --checkpoint checkpoints/best_phase2.pt
-```
-
-**Testing the API:**
-```bash
-curl -X POST http://localhost:8000/predict -F "audio=@test_recording.wav"
-```
-
-**Example JSON Response:**
-```json
-{
-    "anxiety_score": 0.8123,
-    "label": "anxious",
-    "confidence": "high",
-    "threshold": 0.5,
-    "num_segments": 4,
-    "audio_duration_sec": 38.5,
-    "processing_time_ms": 312.4,
-    "top_acoustic_markers": {
-        "pitch_variability": "elevated",
-        "jitter": "elevated",
-        "hnr": "reduced"
-    }
-}
-```
-*(Notice how the API surfaces **acoustic markers** from the eGeMAPS branch to act as clinical evidence for the deep learning score).*
 
 ---
 
-## Verification & Testing
-
-To ensure your environment is set up correctly and the tensor shapes match across all model branches, run the verification harness:
-
-```bash
-# Tests imports, checks component shapes, and verifies loss computation
-python verify.py
-
-# Full test: Downloads Wav2Vec2-base to run a complete forward/backward pass
-python verify.py --full
-```
-
 ## Performance Targets
 
-Based on the implemented architecture, the expected baseline metrics on the DAIC-WOZ dataset are:
+Based on the implemented architectures, the expected baseline metrics on the DAIC-WOZ dataset are:
 
 | Metric | Target | Literature SOTA (DAIC-WOZ Baseline) |
 |--------|--------|-------------------------------------|
 | **AUC-ROC** | ≥ 0.70 | 0.68–0.69 |
-| **UAR** | ≥ 0.60 | 0.60 |
+| **UAR (Macro Recall)** | ≥ 0.60 | 0.60 |
+| **Weighted F1** | ≥ 0.65 | ~0.60 |
 
 ---
-*Developed based on modern computational paralinguistics and parameter-efficient fine-tuning principles.*
+*Developed based on modern computational paralinguistics and parameter-efficient deep learning principles.*
