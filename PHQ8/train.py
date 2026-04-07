@@ -12,13 +12,13 @@ Reads from your local dataset at configs/dataset/:
     ...
 
 Exact implementation of anxiety_detection_architecture.md:
-  Stage 1  – Local AVEC2017 CSVs + participant folders
-  Stage 2  – Frozen wav2vec2-base, Mean+Max pooling → 1536-d per participant
-  Stage 3  – eGeMAPSv02 per 10s segment, mean-aggregated → 88-d per participant
-  Stage 4  – Concatenate 1624-d, cache to hf_embeddings/, StandardScaler, PCA (95%)
-  Stage 5  – SVM (RBF, class_weight=balanced) primary
+  Stage 1  - Local AVEC2017 CSVs + participant folders
+  Stage 2  - Frozen wav2vec2-base, Mean+Max pooling → 1536-d per participant
+  Stage 3  - eGeMAPSv02 per 10s segment, mean-aggregated → 88-d per participant
+  Stage 4  - Concatenate 1624-d, cache to hf_embeddings/, StandardScaler, PCA (95%)
+  Stage 5  - SVM (RBF, class_weight=balanced) primary
               XGBoost (multi:softmax, num_class=25) secondary
-  Stage 6  – weighted F1 + UAR on fixed official splits
+  Stage 6  - weighted F1 + UAR on fixed official splits
 
 Output:
   hf_embeddings/train_X.npy, train_y.npy
@@ -66,9 +66,9 @@ warnings.filterwarnings("ignore")
 # Root folder containing participant sub-folders + AVEC CSV files
 DATASET_DIR = Path("configs/dataset")
 
-# AVEC2017 label CSV filenames (relative to DATASET_DIR)
-TRAIN_CSV   = "train_split_Depression_AVEC2017.csv"
-DEV_CSV     = "dev_split_Depression_AVEC2017.csv"
+# Label CSV filenames (relative to DATASET_DIR)
+TRAIN_CSV   = "train_split.csv"
+DEV_CSV     = "dev_split.csv"
 
 # Output directories (created automatically)
 CACHE_DIR   = Path("hf_embeddings")
@@ -93,13 +93,12 @@ BATCH_SIZE      = 4        # segments per inference batch (GPU memory safe)
 DEVICE          = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # STAGE 1 — Load local AVEC2017 labels
-# ─────────────────────────────────────────────────────────────────────────────
 def load_labels(csv_path: Path) -> Dict[int, int]:
     """
-    Parse an AVEC2017 CSV and return {participant_id: phq8_score (int 0-24)}.
-    Skips rows where PHQ8_Score is missing (test set).
+    Parse a CSV and return {participant_id: phq_score (int 0-24)}.
+    Supports both old AVEC2017 column names and new PHQ_Score column names.
+    Skips rows where score is missing.
     """
     if not csv_path.exists():
         print(f"  [WARN] Label file not found: {csv_path}")
@@ -107,16 +106,22 @@ def load_labels(csv_path: Path) -> Dict[int, int]:
 
     df = pd.read_csv(csv_path)
 
-    # Normalise column names (handles both 'Participant_ID' and 'participant_id')
+    # Normalise column names
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
-    id_col    = next((c for c in df.columns if "participant" in c and "id" in c), None)
-    score_col = next((c for c in df.columns if "phq8_score" in c or "phq_score" in c), None)
 
+    # Find participant ID column
+    id_col = next((c for c in df.columns if "participant" in c and "id" in c), None)
     if id_col is None:
         print(f"  [ERROR] Cannot find participant ID column in {csv_path.name}")
         return {}
+
+    # Find PHQ score column — supports both 'PHQ_Score' and 'PHQ8_Score'
+    score_col = next(
+        (c for c in df.columns if c in ("phq_score", "phq8_score")),
+        None
+    )
     if score_col is None:
-        print(f"  [SKIP] {csv_path.name} has no PHQ8_Score column (test set — labels hidden)")
+        print(f"  [SKIP] {csv_path.name} has no PHQ score column (test set — labels hidden)")
         return {}
 
     labels: Dict[int, int] = {}
@@ -134,11 +139,22 @@ def load_labels(csv_path: Path) -> Dict[int, int]:
 
 def discover_participant(pid: int, dataset_dir: Path) -> Optional[Dict]:
     """
-    Find audio + transcript for a participant.
-    Tries nested layout first: {PID}_P/{PID}_AUDIO.wav
-    Then flat:                 {PID}_AUDIO.wav
+    Find audio for a participant.
+    Layout 1 (flat, new):   All_participants/{PID}_AUDIO.wav
+    Layout 2 (nested, old): {PID}_P/{PID}_AUDIO.wav
+    Transcript CSV is optional — used when present to strip interviewer turns.
     """
-    # Nested (standard DAIC-WOZ layout)
+    # Flat layout (new dataset structure)
+    flat_audio = dataset_dir / "All_participants" / f"{pid}_AUDIO.wav"
+    flat_tx    = dataset_dir / "full-extended-transcript" / f"{pid}_TRANSCRIPT.csv"
+    if flat_audio.exists():
+        return {
+            "pid": pid,
+            "audio": str(flat_audio),
+            "transcript": str(flat_tx) if flat_tx.exists() else None,
+        }
+
+    # Nested fallback (legacy DAIC-WOZ layout: {PID}_P/{PID}_AUDIO.wav)
     nested_audio = dataset_dir / f"{pid}_P" / f"{pid}_AUDIO.wav"
     nested_tx    = dataset_dir / f"{pid}_P" / f"{pid}_TRANSCRIPT.csv"
     if nested_audio.exists():
@@ -148,22 +164,10 @@ def discover_participant(pid: int, dataset_dir: Path) -> Optional[Dict]:
             "transcript": str(nested_tx) if nested_tx.exists() else None,
         }
 
-    # Flat fallback
-    flat_audio = dataset_dir / f"{pid}_AUDIO.wav"
-    flat_tx    = dataset_dir / f"{pid}_TRANSCRIPT.csv"
-    if flat_audio.exists():
-        return {
-            "pid": pid,
-            "audio": str(flat_audio),
-            "transcript": str(flat_tx) if flat_tx.exists() else None,
-        }
-
-    return None  # participant folder not present locally
+    return None  # audio not found locally
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # AUDIO UTILITIES (§Stage 1)
-# ─────────────────────────────────────────────────────────────────────────────
 def normalize(wav: np.ndarray) -> np.ndarray:
     peak = np.max(np.abs(wav))
     return (wav / peak).astype(np.float32) if peak > 1e-6 else wav.astype(np.float32)
@@ -232,9 +236,7 @@ def make_segments(wav: np.ndarray, sr: int) -> List[np.ndarray]:
     return segments
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # STAGE 2 — Frozen wav2vec2-base extractor
-# ─────────────────────────────────────────────────────────────────────────────
 class FrozenWav2VecExtractor(nn.Module):
     """
     ALL 95M parameters frozen (CNN encoder + 12 Transformer blocks).
@@ -309,9 +311,7 @@ def extract_wav2vec_participant(
     return stacked.mean(axis=0)                  # (1536,) participant-level
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # STAGE 3 — eGeMAPSv02 features
-# ─────────────────────────────────────────────────────────────────────────────
 def extract_egemaps_per_segments(
     segments: List[np.ndarray], sr: int
 ) -> np.ndarray:
@@ -339,9 +339,7 @@ def extract_egemaps_per_segments(
     return np.stack(seg_feats, axis=0).mean(axis=0)   # (88,)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # STAGE 1-3 combined — process one participant
-# ─────────────────────────────────────────────────────────────────────────────
 def process_participant(
     info: Dict,
     phq_score: int,
@@ -364,22 +362,22 @@ def process_participant(
         # ── Participant speech only (strips Ellie's turns) ────────────────
         wav = get_participant_speech(wav, info["transcript"], TARGET_SR)
 
-        # ── Normalize + VAD ───────────────────────────────────────────────
+        # ── Normalize + VAD
         wav = normalize(wav)
         wav = apply_vad(wav, TARGET_SR)
         duration = len(wav) / TARGET_SR
 
-        # ── Segment into 10s windows with 2s overlap ──────────────────────
+        #Segment into 10s windows with 2s overlap 
         segments = make_segments(wav, TARGET_SR)
         print(f"    {pid}: {duration:.1f}s → {len(segments)} segments | PHQ={phq_score}")
 
-        # ── Stage 2: Frozen wav2vec2-base ─────────────────────────────────
+        #Stage 2: Frozen wav2vec2-base
         wav2vec_vec = extract_wav2vec_participant(segments, model)   # (1536,)
 
-        # ── Stage 3: eGeMAPSv02 ───────────────────────────────────────────
+        #Stage 3: eGeMAPSv02
         egemaps_vec = extract_egemaps_per_segments(segments, TARGET_SR)  # (88,)
 
-        # ── Stage 4: Concatenate ──────────────────────────────────────────
+        #Stage 4: Concatenate
         fused = np.concatenate([wav2vec_vec, egemaps_vec])              # (1624,)
 
         del wav, segments
@@ -392,9 +390,7 @@ def process_participant(
         return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # STAGE 4 — Feature extraction with disk caching
-# ─────────────────────────────────────────────────────────────────────────────
 def load_or_extract_split(
     split_name: str,
     labels: Dict[int, int],
@@ -436,11 +432,11 @@ def load_or_extract_split(
             y_list.append(score)
 
     if missing:
-        print(f"  [WARN] {len(missing)} participants in labels but no audio found locally: "
-              f"{missing[:10]}{'...' if len(missing) > 10 else ''}")
+        print(f"[WARN] {len(missing)} participants in labels but no audio found locally: "
+         f"{missing[:10]}{'...' if len(missing) > 10 else ''}")
 
     if not X_list:
-        print(f"  [ERROR] No features extracted for split '{split_name}'")
+        print(f"[ERROR] No features extracted for split '{split_name}'")
         return np.empty((0, FUSED_DIM), dtype=np.float32), np.empty((0,), dtype=np.int64)
 
     X = np.array(X_list, dtype=np.float32)
@@ -448,7 +444,7 @@ def load_or_extract_split(
 
     np.save(str(cache_X), X)
     np.save(str(cache_y), y)
-    print(f"  [Cache] Saved {split_name}: X={X.shape}, y={y.shape}")
+    print(f"[Cache] Saved {split_name}: X={X.shape}, y={y.shape}")
 
     return X, y
 
@@ -469,9 +465,7 @@ def evaluate_split(
     # Ensure predictions are integers (XGBoost returns float)
     y_pred = np.array(y_pred, dtype=np.int64)
 
-    print(f"\n{'─'*60}")
-    print(f"  {split_name.upper()} RESULTS  (PHQ-8 Score — classes 0-24)")
-    print(f"{'─'*60}")
+    print(f"{split_name.upper()} RESULTS  (PHQ-8 Score — classes 0-24)")
     print(classification_report(y_true, y_pred, zero_division=0))
 
     w_f1 = f1_score(y_true, y_pred, average="weighted", zero_division=0)
@@ -486,7 +480,7 @@ def evaluate_split(
     unique = np.unique(np.concatenate([y_true, y_pred]))
     if len(unique) <= 15:
         cm = confusion_matrix(y_true, y_pred, labels=unique)
-        print(f"\n  Confusion matrix (classes {unique.tolist()}):")
+        print(f"\n Confusion matrix (classes {unique.tolist()}):")
         print(cm)
 
 
@@ -503,14 +497,12 @@ def train_and_evaluate(
     """
     SCALERS_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n{'='*60}")
-    print(f"  STAGE 4 — Scaling & Dimensionality Reduction")
-    print(f"{'='*60}")
-    print(f"  Train : {len(X_train)} samples | feature dim : {X_train.shape[1]}")
-    print(f"  Dev   : {len(X_dev)} samples")
-    print(f"  Train PHQ classes seen : {np.unique(y_train).tolist()}")
+    print(f"STAGE 4 — Scaling & Dimensionality Reduction")
+    print(f"Train : {len(X_train)} samples | feature dim : {X_train.shape[1]}")
+    print(f"Dev   : {len(X_dev)} samples")
+    print(f"Train PHQ classes seen : {np.unique(y_train).tolist()}")
 
-    # ── StandardScaler (fit on train only) ───────────────────────────────
+    # StandardScaler (fit on train only) 
     print("\n  Fitting StandardScaler …")
     scaler = StandardScaler()
     X_train_s = scaler.fit_transform(X_train)
@@ -518,7 +510,7 @@ def train_and_evaluate(
     joblib.dump(scaler, SCALERS_DIR / "scaler_hf.joblib")
     print("  Saved → scalers/scaler_hf.joblib")
 
-    # ── PCA (95% variance) ────────────────────────────────────────────────
+    # PCA (95% variance)
     print("\n  Fitting PCA (95% variance) …")
     pca = PCA(n_components=0.95, random_state=42)
     X_train_p = pca.fit_transform(X_train_s)
@@ -529,12 +521,11 @@ def train_and_evaluate(
     joblib.dump(pca, SCALERS_DIR / "pca_hf.joblib")
     print("  Saved → scalers/pca_hf.joblib")
 
-    # ── STAGE 5 (Primary): SVM ────────────────────────────────────────────
-    print(f"\n{'='*60}")
-    print(f"  STAGE 5 (Primary) — SVM · RBF Kernel")
-    print(f"{'='*60}")
-    print("  C=1.0 · gamma='scale' · class_weight='balanced' · probability=True")
-    print("  Training … (on small N this is fast; on 100+ participants ~1–3 min)")
+    # STAGE 5 (Primary): SVM 
+
+    print(f"STAGE 5 (Primary) — SVM · RBF Kernel")
+    print("C=1.0 · gamma='scale' · class_weight='balanced' · probability=True")
+    print("Training … (on small N this is fast; on 100+ participants ~1–3 min)")
 
     svm = SVC(
         kernel="rbf",
@@ -546,17 +537,15 @@ def train_and_evaluate(
     )
     svm.fit(X_train_p, y_train)
     joblib.dump(svm, SCALERS_DIR / "svm_phq_classifier.joblib")
-    print("  Saved → scalers/svm_phq_classifier.joblib")
+    print("Saved → scalers/svm_phq_classifier.joblib")
 
-    print("\n  === SVM Results ===")
+    print("\nSVM Results")
     evaluate_split(svm, X_train_p, y_train, "train (SVM)")
     if len(X_dev_p) > 0:
         evaluate_split(svm, X_dev_p, y_dev, "dev (SVM)")
 
-    # ── STAGE 5 (Secondary): XGBoost ─────────────────────────────────────
-    print(f"\n{'='*60}")
-    print(f"  STAGE 5 (Secondary) — XGBoost")
-    print(f"{'='*60}")
+    # STAGE 5 (Secondary): XGBoost
+    print(f"STAGE 5 (Secondary) — XGBoost")
     try:
         print(f"XGBoost {xgb.__version__} | objective=multi:softmax | num_class={NUM_CLASSES}")
 
@@ -695,24 +684,20 @@ def main():
     for name, X, y in [("train", X_train, y_train), ("dev", X_dev, y_dev)]:
         if len(X) > 0:
             unique, counts = np.unique(y, return_counts=True)
-            print(f"{name:6s}: {len(X)} participants | "
-                  f"PHQ [{int(y.min())}-{int(y.max())}] | "
-                  f"{len(unique)} distinct classes")
+            print(f"{name:6s}: {len(X)} participants | " f"PHQ [{int(y.min())}-{int(y.max())}] | " f"{len(unique)} distinct classes")
         else:
             print(f"{name:6s}: 0 participants (no audio found)")
 
     if len(X_train) == 0:
-        print("\n[FATAL] No training features. Check that audio files exist under "
-              f"{DATASET_DIR.resolve()}")
+        print("\n[FATAL] No training features. Check that audio files exist under " f"{DATASET_DIR.resolve()}")
         return
 
-    # Stage 4-5-6: Scale → PCA → Train classifiers → Evaluate ──────────
+    # Stage 4-5-6: Scale → PCA → Train classifiers → Evaluate
     train_and_evaluate(X_train, y_train, X_dev, y_dev)
 
     print("PIPELINE COMPLETE")
     print("Saved artefacts:")
-    for f in ["scaler_hf.joblib", "pca_hf.joblib",
-              "svm_phq_classifier.joblib", "xgb_phq_classifier.joblib"]:
+    for f in ["scaler_hf.joblib", "pca_hf.joblib", "svm_phq_classifier.joblib", "xgb_phq_classifier.joblib"]:
         p = SCALERS_DIR / f
         if p.exists():
             print(f"{p}")
